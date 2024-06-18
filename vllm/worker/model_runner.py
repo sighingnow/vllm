@@ -14,6 +14,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import graph_capture
+
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -143,6 +145,32 @@ class ModelRunner:
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
+        # Delay the initialization of vineyard cache after model loading
+        # to ensure the tensor model parallel group is initialized.
+        self.vineyard_llm_cache = None
+
+    def _init_vineyard_cache(self):
+        if envs.VLLM_USE_VINEYARD_CACHE:
+            if not self.scheduler_config.chunked_prefill_enabled:
+                logger.warn("Vineyard LLM cache is not enabled, requires chunked prefill")
+            elif not envs.VLLM_USE_FLASH_ATTN_DECODING:
+                logger.warn("Vineyard LLM cache is not enabled, requires flash attention decoding")
+            else:
+                from vllm.worker.vineyard_llm_cache import VineyardLLMCache
+                self.vineyard_llm_cache: VineyardLLMCache = VineyardLLMCache.from_envs(
+                    model_config=self.model_config,
+                    parallel_config=self.parallel_config,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
+                                                         self.model_config.dtype),
+                )
+                if self.vineyard_llm_cache:
+                    logger.info("Using Vineyard LLM cache")
+                else:
+                    logger.warn("Vineyard LLM cache is failed to be initialized")
+        else:
+            logger.info("Vineyard LLM cache is not enabled")
+
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(
@@ -209,6 +237,8 @@ class ModelRunner:
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
+        self._init_vineyard_cache()
+
     def save_sharded_state(
         self,
         path: str,
@@ -222,6 +252,9 @@ class ModelRunner:
             pattern=pattern,
             max_size=max_size,
         )
+
+    def set_block_size(self, block_size: int) -> None:
+        self.block_size = block_size
 
     def save_tensorized_model(
         self,
@@ -730,6 +763,10 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
+        if self.vineyard_llm_cache and kv_caches[0] is not None:
+            cache_hints = self.vineyard_llm_cache.prefetch_kv_caches(
+                seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
+
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_kwargs
          ) = self.prepare_input_tensors(seq_group_metadata_list)
@@ -756,6 +793,10 @@ class ModelRunner:
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
+        if self.vineyard_llm_cache and kv_caches[0] is not None:
+            self.vineyard_llm_cache.update_kv_caches(
+                cache_hints, seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
