@@ -107,6 +107,12 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]] = None
 
+    # (batch_size,). The original sequence length per sequence.
+    orig_seq_lens: Optional[List[int]] = None
+
+    # original sequence lengths as tensor.
+    orig_seq_lens_tensor: Optional[torch.Tensor] = None
+
     # FIXME: It is for flash attn.
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is

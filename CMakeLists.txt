@@ -189,6 +189,7 @@ set(VLLM_EXT_SRC
   "csrc/cache_kernels.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
+  "csrc/attention/vertical_slash_index.cu"
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
@@ -549,8 +550,8 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 96266b1111111f3d11aabefaf3bacbab6a89d03c
+          GIT_REPOSITORY https://github.com/minminsun/flash-attention.git
+          GIT_TAG 260da6541a1d53a7562963bf7f6f8cfc04661ba3
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

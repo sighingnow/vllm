@@ -318,6 +318,8 @@ class CommonAttentionState(AttentionState):
             multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
+            orig_seq_lens=None,
+            orig_seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,
             max_decode_query_len=1,
             max_prefill_seq_len=0,

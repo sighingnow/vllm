@@ -490,6 +490,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # already computed) and sequence length (total number of tokens).
 
         seq_len = seq_data.get_len()
+        orig_seq_len = seq_data.get_len()
         if inter_data.is_prompt:
             context_len = seq_data.get_num_computed_tokens()
             seq_len = min(seq_len, context_len + token_chunk_size)
@@ -504,7 +505,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         token_types = seq_group_metadata.token_type_ids
 
         inter_data.seq_lens[seq_idx] = seq_len
-        inter_data.orig_seq_lens[seq_idx] = seq_len
+        inter_data.orig_seq_lens[seq_idx] = orig_seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))

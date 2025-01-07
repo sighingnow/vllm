@@ -1,5 +1,5 @@
 """Attention layer."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -42,6 +42,7 @@ class Attention(nn.Module):
         per_layer_sliding_window: Optional[int] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        dual_chunk_attention_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         if per_layer_sliding_window is not None:
@@ -95,13 +96,18 @@ class Attention(nn.Module):
                                         block_size, is_attention_free,
                                         blocksparse_params is not None)
         impl_cls = attn_backend.get_impl_cls()
-        self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type)
+        self.impl = impl_cls(
+            num_heads, head_size, scale, num_kv_heads, alibi_slopes,
+            sliding_window, kv_cache_dtype, blocksparse_params,
+            logits_soft_cap, attn_type, **{
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+                "prefix": prefix,
+            } if dual_chunk_attention_config is not None else {})
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.backend = backend_name_to_enum(attn_backend.get_name())
+        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
@@ -136,7 +142,22 @@ class Attention(nn.Module):
         value: torch.Tensor,
         _kv_cache: torch.Tensor,
         _attn_metadata: AttentionMetadata,
+        query_succ_and_inter: Optional[Tuple[torch.Tensor, torch.Tensor,
+                                             torch.Tensor,
+                                             torch.Tensor]] = None,
     ) -> torch.Tensor:
+
+        if self.dual_chunk_attention_config:
+            assert query_succ_and_inter is not None
+            dca_kwargs = {
+                "query_succ": query_succ_and_inter[0],
+                "query_inter": query_succ_and_inter[1],
+                "query_succ_critical": query_succ_and_inter[2],
+                "query_inter_critical": query_succ_and_inter[3],
+            } if query_succ_and_inter else {}
+        else:
+            dca_kwargs = {}
+
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -151,17 +172,18 @@ class Attention(nn.Module):
                 value = value.view(-1, self.num_kv_heads, self.head_size)
             if self.use_direct_call:
                 unified_attention_with_output(query, key, value, output,
-                                              self.layer_name)
+                                              self.layer_name, **dca_kwargs)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query, key, value, output, self.layer_name, **dca_kwargs)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
-                return unified_attention(query, key, value, self.layer_name)
+                return unified_attention(query, key, value, self.layer_name,
+                                         **dca_kwargs)
             else:
                 return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name)
+                    query, key, value, self.layer_name, **dca_kwargs)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.impl.head_size}"  # type: ignore
@@ -240,13 +262,23 @@ def unified_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    query_succ: torch.Tensor = None,
+    query_inter: torch.Tensor = None,
+    query_succ_critical: torch.Tensor = None,
+    query_inter_critical: torch.Tensor = None,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
+    dca_kwargs = {
+        "query_succ": query_succ,
+        "query_inter": query_inter,
+        "query_succ_critical": query_succ_critical,
+        "query_inter_critical": query_inter_critical,
+    } if self.dual_chunk_attention_config else {}
     return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                             self._k_scale, self._v_scale)
+                             self._k_scale, self._v_scale, **dca_kwargs)
 
 
 def unified_attention_fake(
@@ -254,6 +286,10 @@ def unified_attention_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    query_succ: torch.Tensor = None,
+    query_inter: torch.Tensor = None,
+    query_succ_critical: torch.Tensor = None,
+    query_inter_critical: torch.Tensor = None,
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
 
@@ -273,11 +309,21 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    query_succ: torch.Tensor = None,
+    query_inter: torch.Tensor = None,
+    query_succ_critical: torch.Tensor = None,
+    query_inter_critical: torch.Tensor = None,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
+    dca_kwargs = {
+        "query_succ": query_succ,
+        "query_inter": query_inter,
+        "query_succ_critical": query_succ_critical,
+        "query_inter_critical": query_inter_critical,
+    } if self.dual_chunk_attention_config else {}
     self.impl.forward(query,
                       key,
                       value,
@@ -285,7 +331,8 @@ def unified_attention_with_output(
                       attn_metadata,
                       self._k_scale,
                       self._v_scale,
-                      output=output)
+                      output=output,
+                      **dca_kwargs)
 
 
 def unified_attention_with_output_fake(
@@ -294,6 +341,10 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    query_succ: torch.Tensor = None,
+    query_inter: torch.Tensor = None,
+    query_succ_critical: torch.Tensor = None,
+    query_inter_critical: torch.Tensor = None,
 ) -> None:
     return
 
