@@ -20,7 +20,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, StoreBoolean
+from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
+                        StoreBoolean)
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -1043,6 +1044,12 @@ class EngineArgs:
             raise ValueError(
                 "BitsAndBytes load format and QLoRA adapter only support "
                 f"'bitsandbytes' quantization, but got {self.quantization}")
+
+        if envs.VLLM_ATTENTION_BACKEND in [STR_DUAL_CHUNK_FLASH_ATTN_VAL]:
+            assert self.enforce_eager, (
+                "Cuda graph is not supported with DualChunkFlashAttention. "
+                "To run the model in eager mode, set 'enforce_eager=True' "
+                "or use '--enforce-eager' in the CLI.")
 
         assert self.cpu_offload_gb >= 0, (
             "CPU offload space must be non-negative"
